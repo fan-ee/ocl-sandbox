@@ -6,3 +6,5 @@ python-dotenv>=1.0.0
 requests>=2.30.0
 pymysql>=1.1.0
 sqlalchemy>=2.0.0
+sentence-transformers==3.3.1
+

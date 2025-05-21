@@ -1,6 +1,8 @@
 from typing import List, Tuple
 import pandas as pd
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from sentence_transformers import SentenceTransformer
+
 import torch
 from tqdm import tqdm
 
@@ -21,64 +23,86 @@ candidate_pool = [
     ("2093-3", "Cholesterol [Mass/volume] in Serum or Plasma"),
     ("2571-8", "Triglyceride [Mass/volume] in Serum or Plasma"),
     ("1920-8", "AST [Enzymatic activity/volume] in Serum or Plasma"),
-    ("1742-6", "Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma"),
-    ("6768-6", "Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma"),
+    ("1742-6",
+     "Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma"),
+    ("6768-6",
+     "Alkaline phosphatase [Enzymatic activity/volume] in Serum or Plasma"),
     ("1975-2", "Total Bilirubin [Mass/volume] in Serum or Plasma"),
     ("2085-9", "HDL Cholesterol [Mass/volume] in Serum or Plasma"),
     ("2089-1", "LDL Cholesterol [Mass/volume] in Serum or Plasma")
 ]
 
+
 class MedicalTermRanker:
-    def __init__(self, candidate_pool):
+    def __init__(self, candidate_pool, method: str):
         """Initialize the cross-encoder model for medical term ranking."""
-        model_name = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
         self.candidates = candidate_pool
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.model.to(self.device)
+        if method == 'cross':
+            model_name = 'cross-encoder/ms-marco-MiniLM-L-6-v2'
+            self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self._model = AutoModelForSequenceClassification.from_pretrained(
+                model_name)
+            self._score_method = self.cross_encoder_score
+
+        if method == 'bi':
+            self._model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+            self._score_method = self.bi_encoder_score
+
+    def bi_encoder_score(self, query: str, candidate: str) -> float:
+        """Get similarity score between query and candidate using bi-encoder."""
+        query_vec = self._model.encode(str(query))
+        candidate_vec = self._model.encode(str(candidate))
+        similarities = self._model.similarity(query_vec, candidate_vec)
+        score = float(similarities.numpy()[0][0])
+        return score
+
+    def cross_encoder_score(self, query: str, candidate: str) -> float:
+        """Get similarity score between query and candidate using cross-encoder."""
+        
+        device = torch.device(
+            'cuda' if torch.cuda.is_available() else 'cpu')
+        self._model.to(device)
         # Add deterministic setting for better reproducibility
         torch.backends.cudnn.deterministic = True
 
-    def get_similarity_score(self, query: str, candidate: str) -> float:
-        """Get similarity score between query and candidate using cross-encoder."""
-        inputs = self.tokenizer(
+        inputs = self._tokenizer(
             [query],
             [candidate],
             padding=True,
             truncation=True,
             return_tensors='pt'
         )
-        inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
         with torch.no_grad():
-            outputs = self.model(**inputs)
+            outputs = self._model(**inputs)
             scores = outputs.logits.squeeze()
             return float(scores.cpu().numpy())
 
     def rank_terms(self, description: str) -> List[Tuple[str, str, float]]:
         """
         Rank LOINC terms based on their relevance to the input description.
-        
+
         Args:
             description (str): Free-form text description of the medical concept
-            
+
         Returns:
             List[Tuple[str, str, float]]: Ranked list of (LOINC code, description, score)
         """
         # Get similarity scores for each candidate
         results = [
-            (code, desc, self.get_similarity_score(description, desc))
+            (code, desc, self._score_method(description, desc))
             for code, desc in tqdm(self.candidates, desc='Ranking terms')
         ]
-        
+
         # Sort by score in descending order
         ranked_results = sorted(results, key=lambda x: x[2], reverse=True)
         return ranked_results
 
     def print_ranked_results(self, ranked_results: List[Tuple[str, str, float]]):
         """Print ranked results in a formatted way."""
-        df = pd.DataFrame(ranked_results, columns=['LOINC Code', 'Description', 'Score'])
+        df = pd.DataFrame(ranked_results, columns=[
+                          'LOINC Code', 'Description', 'Score'])
         df['Score'] = df['Score'].round(4)
         print("\nRanked Results:")
         print(df.to_string(index=False))
